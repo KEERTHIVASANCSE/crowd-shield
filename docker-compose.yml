@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  # Spring Boot backend
+  backend:
+    build:
+      context: . # The root directory containing this docker-compose.yml
+      dockerfile: Dockerfile
+    container_name: crowdshield-backend
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://trolley.proxy.rlwy.net:27879/crowdshield?useSSL=true&requireSSL=true&serverTimezone=UTC&allowPublicKeyRetrieval=true&useServerPrepStmts=true&cachePrepStmts=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: bpanAyeSHpcJVKTJWzGgPOpDdYgnWTRU
+
+  # Frontend Service (using Nginx for static files)
+  frontend:
+    build:
+      context: ./Frontend   # Path to your frontend folder
+      dockerfile: Dockerfile
+    container_name: crowdshield-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
