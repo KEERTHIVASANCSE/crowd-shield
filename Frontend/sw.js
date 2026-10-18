@@ -1,5 +1,5 @@
 // Service Worker for CrowdShield PWA
-const CACHE_NAME = 'crowdshield-v1.0.0';
+const CACHE_NAME = 'crowdshield-v1.0.1';
 const urlsToCache = [
   '/',
   '/index.html',
@@ -64,9 +64,10 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Skip API requests - always go to network
+  // Skip API requests and local development - always go to network
   if (event.request.url.includes('/api/') || 
-      event.request.url.includes('localhost:8080')) {
+      event.request.url.includes('localhost') ||
+      event.request.url.includes('127.0.0.1')) {
     return;
   }
 
