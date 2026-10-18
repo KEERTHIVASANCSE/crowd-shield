@@ -26,21 +26,13 @@ let lastSavedAlerts = new Map();
 // Social account links mapping for modal popup
 const SOCIAL_ACCOUNTS = {
     github: [
-        { name: 'Ghansham Bordekar', handle: '@ghanshambordekar3', url: 'https://github.com/ghanshambordekar3' },
-        { name: 'Vaibhav Ingle', handle: '@Vaibhav01-bit', url: 'https://github.com/Vaibhav01-bit' }
+        { name: 'KEERTHIVASANCSE', handle: '@KEERTHIVASANCSE', url: 'https://github.com/KEERTHIVASANCSE' }
     ],
     linkedin: [
-        { name: 'Ghansham Bordekar', handle: 'linkedin.com/in/ghansham-bordekar', url: 'https://www.linkedin.com/in/ghansham-bordekar' },
-        { name: 'Vaibhav Ingle', handle: 'linkedin.com/in/vaibhav-ingle...', url: 'https://www.linkedin.com/in/vaibhav-ingle-649bb8253?utm_source=share&utm_campaign=share_via&utm_content=profile&utm_medium=android_app' }
+        { name: 'KEERTHI VASAN V', handle: 'linkedin.com/in/vasan2006', url: 'https://www.linkedin.com/in/vasan2006/' }
     ],
-    instagram: [
-        { name: 'Ghansham Bordekar', handle: '@sh_y_am_3', url: 'https://instagram.com/sh_y_am_3' },
-        { name: 'Vaibhav Ingle', handle: '@Vaibhavingle07', url: 'https://instagram.com/Vaibhavingle07' }
-    ],
-    whatsapp: [
-        { name: 'Ghansham Bordekar', handle: '+91 88498 26386', url: 'https://wa.me/8849826386' },
-        { name: 'Vaibhav Ingle', handle: '+91 87672 08015', url: 'https://wa.me/8767208015' }
-    ],
+    instagram: [],
+    whatsapp: [],
     platformColors: {
         github: '#ffffff',
         linkedin: '#0A66C2',
