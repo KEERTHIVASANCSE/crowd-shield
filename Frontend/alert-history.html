@@ -361,6 +361,16 @@
     </div>
 
     <script>
+        const API_BASE_URL = (function() {
+            if (typeof window !== 'undefined') {
+                const hostname = window.location.hostname;
+                if (hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+                    return 'http://localhost:8080';
+                }
+            }
+            return 'https://crowdshield-ais-powered-crowd-disaster.onrender.com';
+        })();
+
         // Load alerts when page loads
         document.addEventListener('DOMContentLoaded', function() {
             loadAlerts();
@@ -384,7 +394,7 @@
             refreshBtn.disabled = true;
 
             // Fetch alerts from backend
-            fetch('https://crowdshield-ais-powered-crowd-disaster.onrender.com/api/alerts/history') // This was already correct, but good to confirm.
+            fetch(`${API_BASE_URL}/api/alerts/history`)
                 .then(response => {
                     if (!response.ok) {
                         throw new Error('Failed to fetch alerts');

@@ -1,5 +1,13 @@
 // =============== GLOBAL VARIABLES ===============
-const API_BASE_URL = "https://crowdshield-ais-powered-crowd-disaster.onrender.com"; // Render backend URL 
+const API_BASE_URL = (function() {
+    if (typeof window !== 'undefined') {
+        const hostname = window.location.hostname;
+        if (hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+            return 'http://localhost:8080';
+        }
+    }
+    return 'https://crowdshield-ais-powered-crowd-disaster.onrender.com';
+})(); // Auto-switches to local Spring Boot backend when running locally or file://
 let map;
 let charts = {};
 let updateInterval;
@@ -4717,7 +4725,7 @@ function toggleHeatmapLayers() {
 // =============== BACKEND API INTEGRATION ===============
 // Function to fetch and display density data from backend
 function fetchDensityData() {
-    fetch("http://localhost:8080/api/density")
+    fetch(`${API_BASE_URL}/api/density`)
         .then(response => response.json())
         .then(data => {
             console.log("Density Data from Backend:", data);
@@ -6300,8 +6308,8 @@ function saveAlertToDatabase(alertResult) {
         timestamp: new Date().toISOString()
     };
 
-    // Save to MySQL database via backend API
-    fetch('http://localhost:8080/api/alerts', {
+    // Save to database via backend API
+    fetch(`${API_BASE_URL}/api/alerts`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'

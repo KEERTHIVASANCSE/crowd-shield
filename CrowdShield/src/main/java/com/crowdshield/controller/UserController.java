@@ -6,13 +6,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@CrossOrigin(origins = "https://crowd-shield-ai-powered-crowd-disas-rust.vercel.app/")
+@CrossOrigin(origins = "*")
 @RequestMapping("/api")
 public class UserController {
 
     @PostMapping("/login")
     public ResponseEntity<String> login(@RequestBody LoginRequest loginRequest) {
-        if (loginRequest.getUsername().equals("admin") && loginRequest.getPassword().equals("password")) {
+        if (loginRequest != null && "admin".equals(loginRequest.getUsername()) && "password".equals(loginRequest.getPassword())) {
             return ResponseEntity.ok("Login successful");
         } else {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid credentials");
