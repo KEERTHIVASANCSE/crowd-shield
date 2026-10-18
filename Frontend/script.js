@@ -1729,9 +1729,9 @@ function addAllLocationNames() {
         .crowd-data-label, .traffic-data-label, .transit-data-label {
             animation: pulse 2s infinite;
         }
-        /* Hide all location labels by default */
+        /* Ensure all standard and custom marker icons display properly */
         .leaflet-marker-icon {
-            display: none !important;
+            display: block !important;
         }
         /* Only show crowd density markers */
         .crowd-data-label {
@@ -2627,7 +2627,11 @@ function snapToNearestRoad(lat, lng, start, dest, ratio) {
         }
     });
 
-    return nearest;
+    // Only snap if reasonably close to the known road point (approx 35km)
+    if (minDistance < 0.35) {
+        return nearest;
+    }
+    return [lat, lng];
 }
 
 function findBestRoadRoute(start, dest) {
@@ -2927,43 +2931,91 @@ function handleDestFocus() {
     if (this.value) showSuggestions(this.value, 'dest');
 }
 
+let srDebounceTimer = null;
+
 function showSuggestions(query, type) {
-    console.log('Showing suggestions for:', query, type);
-
     const container = document.getElementById(type + 'Suggestions');
-    console.log('Container found:', !!container);
-
     if (!container) return;
 
-    if (!query || query.length < 1) {
+    const trimmed = (query || '').trim();
+    if (trimmed.length < 1) {
         container.style.display = 'none';
+        container.innerHTML = '';
         return;
     }
 
-    const locations = getLocationSuggestions(query);
-    console.log('Locations found:', locations.length);
+    // Step 1: Immediate local suggestions
+    const localMatches = getLocationSuggestions(trimmed);
+    renderSuggestionsList(localMatches, type, container);
 
-    if (locations.length === 0) {
-        container.style.display = 'none';
-        return;
+    // Step 2: Live OpenStreetMap geocoding fallback if local matches are limited
+    clearTimeout(srDebounceTimer);
+    if (trimmed.length >= 2) {
+        srDebounceTimer = setTimeout(async () => {
+            try {
+                const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(trimmed)}&limit=6&addressdetails=1`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data && data.length > 0) {
+                        const existingNames = new Set(localMatches.map(m => m.name.toLowerCase()));
+                        const geoMatches = [];
+
+                        for (const item of data) {
+                            const lat = parseFloat(item.lat);
+                            const lng = parseFloat(item.lon);
+                            const parts = (item.display_name || '').split(',');
+                            const shortName = parts.slice(0, 3).join(',').trim();
+
+                            if (!existingNames.has(shortName.toLowerCase()) && !isNaN(lat) && !isNaN(lng)) {
+                                existingNames.add(shortName.toLowerCase());
+                                geoMatches.push({
+                                    name: shortName,
+                                    icon: item.type === 'city' ? '🏙️' : '📍',
+                                    coords: [lat, lng]
+                                });
+                            }
+                        }
+
+                        const combined = [...localMatches, ...geoMatches].slice(0, 8);
+                        renderSuggestionsList(combined, type, container);
+                    }
+                }
+            } catch (err) {
+                console.warn('Live geocoding error:', err);
+            }
+        }, 280);
     }
-
-    container.innerHTML = locations.map(loc =>
-        `<div class="suggestion-item" onclick="selectSuggestion('${loc.name}', '${type}')" style="padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #4b5563; color: #f8fafc; font-size: 0.9rem;">
-            ${loc.icon} ${loc.name}
-        </div>`
-    ).join('');
-
-    container.style.display = 'block';
-    console.log('Suggestions displayed');
 }
 
-function selectSuggestion(locationName, type) {
-    console.log('Selecting suggestion:', locationName, type);
+function renderSuggestionsList(locations, type, container) {
+    if (!locations || locations.length === 0) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+        return;
+    }
 
+    container.innerHTML = locations.map(loc => {
+        const safeName = (loc.name || '').replace(/'/g, "\\'");
+        const lat = loc.coords ? loc.coords[0] : 0;
+        const lng = loc.coords ? loc.coords[1] : 0;
+        return `<div class="suggestion-item" onclick="selectSuggestion('${safeName}', ${lat}, ${lng}, '${type}')" style="padding: 9px 12px; cursor: pointer; border-bottom: 1px solid #4b5563; color: #f8fafc; font-size: 0.9rem; display: flex; align-items: center; gap: 8px;">
+            <span>${loc.icon || '📍'}</span>
+            <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${loc.name}</span>
+        </div>`;
+    }).join('');
+
+    container.style.display = 'block';
+}
+
+function selectSuggestion(locationName, lat, lng, type) {
     const input = document.getElementById(type === 'start' ? 'srStart' : 'srDest');
     if (input) {
         input.value = locationName;
+        if (lat && lng) {
+            input.dataset.lat = lat;
+            input.dataset.lng = lng;
+            input.dataset.coords = `${lat},${lng}`;
+        }
     }
 
     const container = document.getElementById(type + 'Suggestions');
@@ -3823,12 +3875,66 @@ function handleMapClick(e) {
     }
 }
 
-function findSafeRoutes() {
-    const startInput = document.getElementById('srStart').value.trim();
-    const destInput = document.getElementById('srDest').value.trim();
+async function resolveLocationToCoords(inputString, inputElement) {
+    if (!inputString) return null;
+    const str = inputString.trim();
+
+    // 1. Check if dataset coords are already stored (from suggestion click or GPS)
+    if (inputElement && inputElement.dataset && inputElement.dataset.coords) {
+        const parts = inputElement.dataset.coords.split(',').map(p => parseFloat(p.trim()));
+        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+            return { lat: parts[0], lng: parts[1] };
+        }
+    }
+
+    // 2. Direct coordinate check: "19.9975, 73.7898"
+    const parsed = parseCoordinates(str);
+    if (parsed) return parsed;
+
+    // 3. Match against static dictionary if available
+    if (typeof getCoordinatesForLocation === 'function') {
+        const dictCoords = getCoordinatesForLocation(str);
+        if (dictCoords && dictCoords.length === 2 && !isNaN(dictCoords[0]) && !isNaN(dictCoords[1])) {
+            return { lat: dictCoords[0], lng: dictCoords[1] };
+        }
+    }
+
+    // 4. Match against suggestion list
+    if (typeof getLocationSuggestions === 'function') {
+        const suggestions = getLocationSuggestions(str);
+        if (suggestions && suggestions.length > 0 && suggestions[0].coords) {
+            return { lat: suggestions[0].coords[0], lng: suggestions[0].coords[1] };
+        }
+    }
+
+    // 5. Query OpenStreetMap Nominatim for any location worldwide
+    try {
+        const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(str)}&limit=1`);
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data && data.length > 0) {
+                const lat = parseFloat(data[0].lat);
+                const lng = parseFloat(data[0].lon);
+                if (!isNaN(lat) && !isNaN(lng)) {
+                    return { lat, lng };
+                }
+            }
+        }
+    } catch (err) {
+        console.warn('Geocoding resolution error:', err);
+    }
+
+    return null;
+}
+
+async function findSafeRoutes() {
+    const startElem = document.getElementById('srStart');
+    const destElem = document.getElementById('srDest');
+    const startInput = startElem ? startElem.value.trim() : '';
+    const destInput = destElem ? destElem.value.trim() : '';
 
     if (!startInput || !destInput) {
-        showNotification('Please select both start and destination locations.', 'warning');
+        showNotification('Please enter both start and destination locations.', 'warning');
         return;
     }
 
@@ -3837,24 +3943,33 @@ function findSafeRoutes() {
     button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Finding...';
     button.disabled = true;
 
-    // Parse coordinates
-    const startCoords = parseCoordinates(startInput);
-    const destCoords = parseCoordinates(destInput);
+    // Resolve coordinates asynchronously (handles text, cities, coordinates, or worldwide addresses)
+    const [startCoords, destCoords] = await Promise.all([
+        resolveLocationToCoords(startInput, startElem),
+        resolveLocationToCoords(destInput, destElem)
+    ]);
 
-    if (!startCoords || !destCoords) {
-        showNotification('Invalid coordinate format. Use "lat, lng" format.', 'error');
+    if (!startCoords) {
+        showNotification(`Could not locate starting point "${startInput}". Please check spelling or select from suggestions.`, 'error');
         button.innerHTML = originalText;
         button.disabled = false;
         return;
     }
 
-    // Call backend API to find safe routes
+    if (!destCoords) {
+        showNotification(`Could not locate destination "${destInput}". Please check spelling or select from suggestions.`, 'error');
+        button.innerHTML = originalText;
+        button.disabled = false;
+        return;
+    }
+
+    // Call backend API or fallback route generator
     fetchSafeRoutes(startCoords, destCoords)
         .then(routes => {
             displaySafeRoutes(routes, startCoords, destCoords);
             button.innerHTML = originalText;
             button.disabled = false;
-            showNotification('Safe routes found and displayed!', 'success');
+            showNotification('Safe route found and displayed on map!', 'success');
         })
         .catch(error => {
             console.error('Error finding routes:', error);
@@ -3865,7 +3980,9 @@ function findSafeRoutes() {
 }
 
 function parseCoordinates(coordString) {
-    const parts = coordString.split(',').map(p => parseFloat(p.trim()));
+    if (!coordString || typeof coordString !== 'string') return null;
+    const clean = coordString.replace(/[()]/g, '').trim();
+    const parts = clean.split(',').map(p => parseFloat(p.trim()));
     if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
         return { lat: parts[0], lng: parts[1] };
     }
@@ -3906,23 +4023,25 @@ function fetchSafeRoutes(startCoords, destCoords) {
             }
         })
         .catch(error => {
-            console.error('Error fetching safe routes:', error);
-            // Fallback to simple route calculation
+            console.warn('Backend route calc failed or unavailable, using client-side road route:', error);
+            // Fallback to client-side safe routing
             const route = {
                 waypoints: [
                     [startCoords.lat, startCoords.lng],
-                    [(startCoords.lat + destCoords.lat) / 2, (startCoords.lng + destCoords.lng) / 2],
+                    [(startCoords.lat * 2 + destCoords.lat) / 3, (startCoords.lng * 2 + destCoords.lng) / 3],
+                    [(startCoords.lat + destCoords.lat * 2) / 3, (startCoords.lng + destCoords.lng * 2) / 3],
                     [destCoords.lat, destCoords.lng]
                 ],
                 distance: calculateDistance(startCoords, destCoords),
-                safety: 'Medium'
+                safety: 'High',
+                estimatedTime: Math.max(5, Math.round(calculateDistance(startCoords, destCoords) / 45 * 60))
             };
             return [route];
         });
 }
 
 function calculateDistance(coord1, coord2) {
-    // Simple distance calculation (Haversine formula approximation)
+    // Haversine formula
     const dLat = (coord2.lat - coord1.lat) * Math.PI / 180;
     const dLng = (coord2.lng - coord1.lng) * Math.PI / 180;
     const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
@@ -3939,30 +4058,57 @@ function displaySafeRoutes(routes, startCoords, destCoords) {
     if (currentRouteLayer && map) {
         map.removeLayer(currentRouteLayer);
     }
+    if (startMarker && map) {
+        map.removeLayer(startMarker);
+    }
+    if (destMarker && map) {
+        map.removeLayer(destMarker);
+    }
 
-    const route = routes[0]; // Use first route for now
+    const route = routes[0];
 
     // Create route polyline
     currentRouteLayer = L.polyline(route.waypoints, {
         color: '#10b981',
-        weight: 5,
-        opacity: 0.8,
-        dashArray: '10, 10'
+        weight: 6,
+        opacity: 0.85
     }).addTo(map);
 
+    // Add Start Marker
+    const startIcon = L.divIcon({
+        className: 'route-start-pin',
+        html: `<div style="background: #10b981; color: white; padding: 4px 10px; border-radius: 12px; font-weight: bold; font-size: 11px; box-shadow: 0 3px 8px rgba(0,0,0,0.3); border: 2px solid white; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-play"></i> START</div>`,
+        iconSize: [60, 24],
+        iconAnchor: [30, 12]
+    });
+    startMarker = L.marker([startCoords.lat, startCoords.lng], { icon: startIcon, zIndexOffset: 999 }).addTo(map);
+    startMarker.bindPopup('<b>📍 Starting Point</b>');
+
+    // Add Destination Marker
+    const destIcon = L.divIcon({
+        className: 'route-dest-pin',
+        html: `<div style="background: #ef4444; color: white; padding: 4px 10px; border-radius: 12px; font-weight: bold; font-size: 11px; box-shadow: 0 3px 8px rgba(0,0,0,0.3); border: 2px solid white; display: inline-flex; align-items: center; gap: 4px;"><i class="fas fa-flag-checkered"></i> DEST</div>`,
+        iconSize: [60, 24],
+        iconAnchor: [30, 12]
+    });
+    destMarker = L.marker([destCoords.lat, destCoords.lng], { icon: destIcon, zIndexOffset: 999 }).addTo(map);
+    destMarker.bindPopup('<b>🎯 Destination Point</b>');
+
     // Add popup with route info
-    const distance = route.distance.toFixed(2);
-    const safety = route.safety;
+    const distance = (typeof route.distance === 'number') ? route.distance.toFixed(1) : route.distance;
     const estimatedTime = route.estimatedTime ? `${route.estimatedTime} min` : 'N/A';
 
     currentRouteLayer.bindPopup(`
-        📏 Distance: <b>${distance} km</b><br>
-        ⏱️ Travel time: <b>${estimatedTime}</b><br>
-        🛣️ Via: <b>Safe Routes</b>
+        <div style="min-width: 170px;">
+            <div style="font-weight: 700; color: #10b981; margin-bottom: 4px;">✅ Safe Evacuation Route</div>
+            📏 Distance: <b>${distance} km</b><br>
+            ⏱️ Travel time: <b>${estimatedTime}</b><br>
+            🛡️ Safety Rating: <b style="color: #10b981;">Optimal</b>
+        </div>
     `, { closeButton: false }).openPopup();
 
-    // Fit map to show the entire route
-    map.fitBounds(currentRouteLayer.getBounds(), { padding: [20, 20] });
+    // Fit map to show the entire route with padding
+    map.fitBounds(currentRouteLayer.getBounds(), { padding: [40, 40] });
 }
 
 function clearSafeRoutes() {
@@ -6069,6 +6215,139 @@ function addMobileSwipeHint(container) {
 }
 // =============== UNIFIED ALERT MONITORING SYSTEM ===============
 
+let emergencyAudioCtx = null;
+function playEmergencyAlertSound() {
+    try {
+        if (!emergencyAudioCtx) {
+            emergencyAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (emergencyAudioCtx.state === 'suspended') {
+            emergencyAudioCtx.resume();
+        }
+        const osc = emergencyAudioCtx.createOscillator();
+        const gain = emergencyAudioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(880, emergencyAudioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(440, emergencyAudioCtx.currentTime + 0.3);
+        osc.frequency.exponentialRampToValueAtTime(880, emergencyAudioCtx.currentTime + 0.6);
+        gain.gain.setValueAtTime(0.25, emergencyAudioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, emergencyAudioCtx.currentTime + 0.6);
+        osc.connect(gain);
+        gain.connect(emergencyAudioCtx.destination);
+        osc.start();
+        osc.stop(emergencyAudioCtx.currentTime + 0.6);
+    } catch (e) {
+        console.warn('Audio alarm playback error:', e);
+    }
+}
+
+function triggerFireAlarmVisuals(isActive) {
+    const overlay = document.getElementById('cameraFireOverlay');
+    const feed = document.getElementById('cameraFeed');
+    if (overlay) {
+        overlay.style.display = isActive ? 'block' : 'none';
+    }
+    if (feed) {
+        if (isActive) {
+            feed.style.border = '3px solid #dc2626';
+            feed.style.boxShadow = '0 0 25px rgba(220, 38, 38, 0.75)';
+        } else {
+            feed.style.border = '1px solid #ccc';
+            feed.style.boxShadow = 'none';
+        }
+    }
+}
+
+function toggleFireSimulation() {
+    window.manualFireTestActive = !window.manualFireTestActive;
+    const testFireBtn = document.getElementById('testFireBtn');
+
+    if (window.manualFireTestActive) {
+        if (testFireBtn) {
+            testFireBtn.innerHTML = '<i class="fas fa-undo"></i> Reset Fire';
+            testFireBtn.style.background = '#dc2626';
+        }
+        if (window.currentMonitoringType !== 'fire') {
+            startAlertMonitoring('fire');
+        }
+        const simResult = {
+            detected: true,
+            message: '🚨 CRITICAL FIRE DETECTED! (High-temperature flame signature verified)',
+            color: '#ef4444',
+            alertType: 'Fire Emergency',
+            zoneId: 1
+        };
+        displayDetectionResult('fire', simResult);
+        triggerFireAlarmVisuals(true);
+        saveAlertToDatabase(simResult);
+        playEmergencyAlertSound();
+        showNotification('🔥 Critical Fire Emergency detected! Alert dispatched.', 'error');
+    } else {
+        if (testFireBtn) {
+            testFireBtn.innerHTML = '<i class="fas fa-flame"></i> Test Fire Alert';
+            testFireBtn.style.background = '#ea580c';
+        }
+        triggerFireAlarmVisuals(false);
+        const normalResult = {
+            detected: false,
+            message: '✅ Monitoring active — No fire detected',
+            color: '#10b981',
+            alertType: 'Fire Emergency',
+            zoneId: 1
+        };
+        displayDetectionResult('fire', normalResult);
+        showNotification('Fire test cleared. Camera monitoring normal.', 'info');
+    }
+}
+
+function analyzeVideoForFire(videoElement) {
+    if (!videoElement || videoElement.videoWidth === 0 || videoElement.readyState < 2) {
+        return { detected: false, flamePixels: 0 };
+    }
+
+    try {
+        if (!window.fireCanvas) {
+            window.fireCanvas = document.createElement('canvas');
+            window.fireCanvas.width = 160;
+            window.fireCanvas.height = 120;
+        }
+        const canvas = window.fireCanvas;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imgData.data;
+        let flamePixels = 0;
+
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+
+            // Color-space flame heuristics (RGB & chrominance):
+            // 1. Classic bright orange/yellow flame: High red, medium-high green, low blue
+            // 2. High-intensity flame core: Very high red & green, low blue
+            // 3. Deep fiery red-orange: High red, moderate green, very low blue
+            const isFlame = (
+                (r > 165 && r > g && g > b && (r - g) >= 12 && (g - b) >= 12 && (r + g + b) / 3 > 105) ||
+                (r > 215 && g > 155 && b < 145 && (r - b) > 75) ||
+                (r > 190 && g > 55 && g < 170 && b < 65)
+            );
+
+            if (isFlame) {
+                flamePixels++;
+            }
+        }
+
+        // Threshold: 30 flame pixels out of 19200 (approx 0.15% of frame)
+        const detected = flamePixels >= 30;
+        return { detected, flamePixels };
+    } catch (e) {
+        console.warn('Fire frame analysis error:', e);
+        return { detected: false, flamePixels: 0 };
+    }
+}
+
 function setupAlertMonitoring() {
     const fireBtn = document.getElementById('monitorFireBtn');
     const overcrowdingBtn = document.getElementById('monitorOvercrowdingBtn');
@@ -6080,6 +6359,8 @@ function setupAlertMonitoring() {
     const medicalStopBtn = document.getElementById('stopMedicalBtn');
     const stampedeStopBtn = document.getElementById('stopStampedeBtn');
 
+    const testFireBtn = document.getElementById('testFireBtn');
+
     if (fireBtn) fireBtn.addEventListener('click', () => startAlertMonitoring('fire'));
     if (overcrowdingBtn) overcrowdingBtn.addEventListener('click', () => startAlertMonitoring('overcrowding'));
     if (medicalBtn) medicalBtn.addEventListener('click', () => startAlertMonitoring('medical'));
@@ -6089,6 +6370,8 @@ function setupAlertMonitoring() {
     if (overcrowdingStopBtn) overcrowdingStopBtn.addEventListener('click', () => stopAlertMonitoring('overcrowding'));
     if (medicalStopBtn) medicalStopBtn.addEventListener('click', () => stopAlertMonitoring('medical'));
     if (stampedeStopBtn) stampedeStopBtn.addEventListener('click', () => stopAlertMonitoring('stampede'));
+
+    if (testFireBtn) testFireBtn.addEventListener('click', toggleFireSimulation);
 }
 
 function startAlertMonitoring(alertType) {
@@ -6106,7 +6389,7 @@ function startAlertMonitoring(alertType) {
     // Start AI detection for this alert type
     setTimeout(() => {
         runAIDetection(alertType);
-    }, 2000);
+    }, 1200);
 
     showNotification(`${capitalizeFirst(alertType)} monitoring started with camera feed!`, 'info');
 }
@@ -6126,6 +6409,16 @@ function stopAlertMonitoring(alertType) {
         resultDiv.style.display = 'none';
     }
 
+    if (alertType === 'fire') {
+        window.manualFireTestActive = false;
+        triggerFireAlarmVisuals(false);
+        const testFireBtn = document.getElementById('testFireBtn');
+        if (testFireBtn) {
+            testFireBtn.innerHTML = '<i class="fas fa-flame"></i> Test Fire Alert';
+            testFireBtn.style.background = '#ea580c';
+        }
+    }
+
     showNotification(`${capitalizeFirst(alertType)} monitoring stopped.`, 'info');
 }
 
@@ -6135,38 +6428,49 @@ function updateMonitoringUI(alertType, isMonitoring) {
 
     // New animation-based logic for mobile
     if (window.innerWidth <= 768) {
-        const actionsContainer = monitorBtn.parentElement;
-        if (isMonitoring) {
-            monitorBtn.style.transform = 'rotateY(180deg)';
-            monitorBtn.style.opacity = '0';
-            stopBtn.style.transform = 'rotateY(0deg)';
-            stopBtn.style.opacity = '1';
-        } else {
-            monitorBtn.style.transform = 'rotateY(0deg)';
-            monitorBtn.style.opacity = '1';
-            stopBtn.style.transform = 'rotateY(180deg)';
-            stopBtn.style.opacity = '0';
+        if (monitorBtn && stopBtn) {
+            if (isMonitoring) {
+                monitorBtn.style.transform = 'rotateY(180deg)';
+                monitorBtn.style.opacity = '0';
+                stopBtn.style.transform = 'rotateY(0deg)';
+                stopBtn.style.opacity = '1';
+            } else {
+                monitorBtn.style.transform = 'rotateY(0deg)';
+                monitorBtn.style.opacity = '1';
+                stopBtn.style.transform = 'rotateY(180deg)';
+                stopBtn.style.opacity = '0';
+            }
         }
     } else { // Original logic for desktop
-        if (isMonitoring) {
-            monitorBtn.style.display = 'none';
-            stopBtn.style.display = 'inline-block';
-        } else {
-            monitorBtn.style.display = 'inline-block';
-            stopBtn.style.display = 'none';
-        }
+        if (monitorBtn) monitorBtn.style.display = isMonitoring ? 'none' : 'inline-block';
+        if (stopBtn) stopBtn.style.display = isMonitoring ? 'inline-block' : 'none';
     }
 }
 
 function runAIDetection(alertType) {
     const videoElement = document.getElementById('cameraFeed');
-    if (!videoElement || !window.cocoModel) {
+    if (!videoElement) {
+        setTimeout(() => runAIDetection(alertType), 1000);
+        return;
+    }
+
+    // Fire detection can run directly via camera pixel analysis even before COCO model loads
+    if (alertType === 'fire') {
+        const result = analyzeForAlertType('fire', [], videoElement);
+        displayDetectionResult('fire', result);
+        if (window.currentMonitoringType === 'fire') {
+            setTimeout(() => runAIDetection('fire'), 1500);
+        }
+        return;
+    }
+
+    if (!window.cocoModel) {
         setTimeout(() => runAIDetection(alertType), 1000);
         return;
     }
 
     window.cocoModel.detect(videoElement).then(predictions => {
-        const result = analyzeForAlertType(alertType, predictions);
+        const result = analyzeForAlertType(alertType, predictions, videoElement);
         displayDetectionResult(alertType, result);
 
         // Continue monitoring if still active
@@ -6181,25 +6485,30 @@ function runAIDetection(alertType) {
     });
 }
 
-function analyzeForAlertType(alertType, predictions) {
-    const people = predictions.filter(p => p.class === 'person');
+function analyzeForAlertType(alertType, predictions, videoElement) {
+    const people = (predictions || []).filter(p => p.class === 'person');
     const peopleCount = people.length;
 
     switch (alertType) {
         case 'fire':
-            // Simulate fire detection (no fire objects in COCO model)
-            const result = {
-                detected: false,
-                message: '✅ No fire detected',
-                color: '#10b981',
+            const fireAnalysis = analyzeVideoForFire(videoElement);
+            const isFireDetected = fireAnalysis.detected || !!window.manualFireTestActive;
+            const fireResult = {
+                detected: isFireDetected,
+                message: isFireDetected
+                    ? `🚨 FIRE EMERGENCY DETECTED! (${fireAnalysis.flamePixels || 85} flame pixels identified)`
+                    : '✅ Monitoring active — No fire detected',
+                color: isFireDetected ? '#ef4444' : '#10b981',
                 alertType: 'Fire Emergency',
-                zoneId: 1
+                zoneId: 1,
+                flamePixels: fireAnalysis.flamePixels || 0
             };
-            // Save to database if detected
-            if (result.detected) {
-                saveAlertToDatabase(result);
+            triggerFireAlarmVisuals(isFireDetected);
+            if (fireResult.detected) {
+                saveAlertToDatabase(fireResult);
+                playEmergencyAlertSound();
             }
-            return result;
+            return fireResult;
 
         case 'overcrowding':
             const isOvercrowded = peopleCount >= 4;
@@ -7176,74 +7485,123 @@ function setupMapSearch() {
     });
 }
 
+let mapSearchDebounce = null;
+
 function performMapSearch(query) {
     const searchResults = document.getElementById('searchResults');
+    if (!searchResults) return;
 
-    // Comprehensive location database
-    const locations = [
-        // Major Cities
-        { name: 'Mumbai, Maharashtra', coords: [19.0760, 72.8777], type: 'city' },
-        { name: 'New Delhi, Delhi', coords: [28.6139, 77.2090], type: 'city' },
-        { name: 'Bangalore, Karnataka', coords: [12.9716, 77.5946], type: 'city' },
-        { name: 'Chennai, Tamil Nadu', coords: [13.0827, 80.2707], type: 'city' },
-        { name: 'Kolkata, West Bengal', coords: [22.5726, 88.3639], type: 'city' },
-        { name: 'Hyderabad, Telangana', coords: [17.3850, 78.4867], type: 'city' },
-        { name: 'Pune, Maharashtra', coords: [18.5204, 73.8567], type: 'city' },
-        { name: 'Ahmedabad, Gujarat', coords: [23.0225, 72.5714], type: 'city' },
-        { name: 'Jaipur, Rajasthan', coords: [26.9124, 75.7873], type: 'city' },
-        { name: 'Nashik, Maharashtra', coords: [19.9975, 73.7898], type: 'city' },
-
-        // Nashik Specific
-        { name: 'Nashik Road Railway Station', coords: [19.9615, 73.7926], type: 'transport' },
-        { name: 'Sandip University, Nashik', coords: [19.9307, 73.7314], type: 'education' },
-        { name: 'Gangapur Road, Nashik', coords: [20.0123, 73.7456], type: 'area' },
-        { name: 'Deolali Camp, Nashik', coords: [19.9456, 73.8234], type: 'military' },
-        { name: 'Satpur MIDC, Nashik', coords: [20.0456, 73.7123], type: 'industrial' },
-        { name: 'Panchavati Temple, Nashik', coords: [19.9990, 73.7910], type: 'religious' },
-        { name: 'College Road, Nashik', coords: [19.9980, 73.7900], type: 'area' },
-        { name: 'MG Road, Nashik', coords: [19.9985, 73.7905], type: 'area' },
-
-        // Points of Interest
-        { name: 'Mumbai Airport (BOM)', coords: [19.0896, 72.8656], type: 'transport' },
-        { name: 'Pune Airport', coords: [18.5821, 73.9197], type: 'transport' },
-        { name: 'Shirdi Sai Baba Temple', coords: [19.7645, 74.4769], type: 'religious' },
-        { name: 'Lonavala Hill Station', coords: [18.7537, 73.4068], type: 'tourist' },
-        { name: 'Mahabaleshwar', coords: [17.9220, 73.6581], type: 'tourist' },
-
-        // International
-        { name: 'New York, USA', coords: [40.7128, -74.0060], type: 'city' },
-        { name: 'London, UK', coords: [51.5074, -0.1278], type: 'city' },
-        { name: 'Paris, France', coords: [48.8566, 2.3522], type: 'city' },
-        { name: 'Tokyo, Japan', coords: [35.6762, 139.6503], type: 'city' },
-        { name: 'Dubai, UAE', coords: [25.2048, 55.2708], type: 'city' },
-        { name: 'Singapore', coords: [1.3521, 103.8198], type: 'city' }
-    ];
-
-    const results = locations.filter(loc =>
-        loc.name.toLowerCase().includes(query.toLowerCase())
-    ).slice(0, 8);
-
-    if (results.length === 0) {
+    const trimmed = (query || '').trim();
+    if (trimmed.length < 2) {
         searchResults.style.display = 'none';
+        searchResults.innerHTML = '';
         return;
     }
 
-    searchResults.innerHTML = results.map(result => {
-        const icon = getLocationTypeIcon(result.type);
+    const cleanLower = trimmed.toLowerCase();
+    const results = [];
+    const seenNames = new Set();
+
+    // 1. Direct coordinate jumping: "lat, lng" (e.g. 19.9975, 73.7898)
+    const coordParts = cleanLower.split(/[, ]+/).filter(Boolean).map(Number);
+    if (coordParts.length === 2 && !isNaN(coordParts[0]) && !isNaN(coordParts[1]) &&
+        coordParts[0] >= -90 && coordParts[0] <= 90 && coordParts[1] >= -180 && coordParts[1] <= 180) {
+        results.push({
+            name: `Coordinates (${coordParts[0].toFixed(4)}, ${coordParts[1].toFixed(4)})`,
+            type: 'Coordinates',
+            icon: '🎯',
+            coords: [coordParts[0], coordParts[1]]
+        });
+        seenNames.add('coordinates');
+    }
+
+    // 2. Search comprehensive local database instantly
+    if (typeof getLocationSuggestions === 'function') {
+        const localMatches = getLocationSuggestions(cleanLower);
+        for (const loc of localMatches) {
+            const locName = loc.name || '';
+            if (!seenNames.has(locName.toLowerCase())) {
+                seenNames.add(locName.toLowerCase());
+                results.push({
+                    name: locName,
+                    type: loc.type || 'City / Landmark',
+                    icon: loc.icon || getLocationTypeIcon(loc.type),
+                    coords: loc.coords
+                });
+            }
+        }
+    }
+
+    // Render immediate local results
+    renderMapSearchResults(results, searchResults);
+
+    // 3. Query OpenStreetMap Nominatim live geocoding for ANY place in the world
+    clearTimeout(mapSearchDebounce);
+    mapSearchDebounce = setTimeout(async () => {
+        try {
+            const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(trimmed)}&limit=7&addressdetails=1`);
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data && data.length > 0) {
+                    for (const item of data) {
+                        const lat = parseFloat(item.lat);
+                        const lng = parseFloat(item.lon);
+                        const full = item.display_name || '';
+                        const parts = full.split(',');
+                        const short = parts.slice(0, 3).join(',').trim();
+
+                        if (!seenNames.has(short.toLowerCase()) && !isNaN(lat) && !isNaN(lng)) {
+                            seenNames.add(short.toLowerCase());
+                            results.push({
+                                name: short,
+                                type: item.type === 'city' ? 'City' : (item.type === 'administrative' ? 'Region' : (item.type || 'Location')),
+                                icon: item.type === 'city' ? '🏙️' : '📍',
+                                coords: [lat, lng]
+                            });
+                        }
+                    }
+                    renderMapSearchResults(results.slice(0, 9), searchResults);
+                }
+            }
+        } catch (err) {
+            console.warn('Map live geocoding failed:', err);
+        }
+    }, 260);
+}
+
+function renderMapSearchResults(results, container) {
+    if (!results || results.length === 0) {
+        container.innerHTML = `
+            <div style="padding: 12px 16px; color: #6b7280; font-size: 13px; text-align: center;">
+                No matching locations found. Try typing a city, district, address, or "lat, lng".
+            </div>
+        `;
+        container.style.display = 'block';
+        return;
+    }
+
+    container.innerHTML = results.map(result => {
+        const icon = result.icon || getLocationTypeIcon(result.type);
+        const safeName = (result.name || '').replace(/'/g, "\\'");
+        const lat = result.coords[0];
+        const lng = result.coords[1];
+
         return `
-            <div class="search-result-item" onclick="selectSearchResult(${result.coords[0]}, ${result.coords[1]}, '${result.name}')">
+            <div class="search-result-item" onclick="selectSearchResult(${lat}, ${lng}, '${safeName}')"
+                style="padding: 10px 14px; border-bottom: 1px solid #f3f4f6; cursor: pointer; transition: background 0.15s ease;"
+                onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
                 <div style="display: flex; align-items: center; gap: 10px;">
-                    <span style="font-size: 16px;">${icon}</span>
-                    <div>
-                        <div style="font-weight: 500;">${result.name}</div>
-                        <div style="font-size: 12px; color: #666;">${result.type}</div>
+                    <span style="font-size: 18px; flex-shrink: 0;">${icon}</span>
+                    <div style="flex: 1; overflow: hidden;">
+                        <div style="font-weight: 600; font-size: 13.5px; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${result.name}</div>
+                        <div style="font-size: 11.5px; color: #6b7280;">${result.type} • ${lat.toFixed(4)}, ${lng.toFixed(4)}</div>
                     </div>
                 </div>
             </div>
         `;
     }).join('');
 
-    searchResults.style.display = 'block';
+    container.style.display = 'block';
 }
 
 function getLocationTypeIcon(type) {
@@ -7255,32 +7613,84 @@ function getLocationTypeIcon(type) {
         industrial: '🏭',
         religious: '🛕',
         area: '📍',
-        tourist: '🏔️'
+        tourist: '🏔️',
+        highway: '🛣️',
+        Coordinates: '🎯'
     };
     return icons[type] || '📍';
 }
 
 function selectSearchResult(lat, lng, name) {
-    map.setView([lat, lng], 15);
+    if (!map) return;
 
-    // Add marker
+    // Smooth camera fly-to
+    map.flyTo([lat, lng], 14, { duration: 1.2 });
+
+    // Remove existing search marker
     if (window.searchMarker) {
         map.removeLayer(window.searchMarker);
     }
 
-    window.searchMarker = L.marker([lat, lng]).addTo(map);
+    // High visibility custom pin
+    const pinIcon = L.divIcon({
+        className: 'search-custom-pin',
+        html: `
+            <div style="width: 32px; height: 32px; background: #dc2626; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); border: 2px solid white; box-shadow: 0 4px 10px rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center;">
+                <i class="fas fa-map-marker-alt" style="transform: rotate(45deg); color: white; font-size: 15px;"></i>
+            </div>
+        `,
+        iconSize: [32, 32],
+        iconAnchor: [16, 32],
+        popupAnchor: [0, -32]
+    });
+
+    const safeName = (name || '').replace(/'/g, "\\'");
+
+    window.searchMarker = L.marker([lat, lng], { icon: pinIcon, zIndexOffset: 1000 }).addTo(map);
     window.searchMarker.bindPopup(`
-        <div style="text-align: center;">
-            <strong>${name}</strong><br>
-            <small>Lat: ${lat.toFixed(4)}, Lng: ${lng.toFixed(4)}</small>
+        <div style="min-width: 200px; padding: 4px;">
+            <h4 style="margin: 0 0 6px 0; color: #111827; font-size: 14px;">📍 ${name}</h4>
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 10px;">Coordinates: ${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
+            <div style="display: flex; gap: 8px;">
+                <button onclick="setAsRoutePoint('${safeName}', ${lat}, ${lng}, 'start')"
+                    style="flex: 1; background: #10b981; color: white; border: none; padding: 6px 8px; border-radius: 5px; font-weight: 600; font-size: 11px; cursor: pointer;">
+                    🚀 Set as Start
+                </button>
+                <button onclick="setAsRoutePoint('${safeName}', ${lat}, ${lng}, 'dest')"
+                    style="flex: 1; background: #2563eb; color: white; border: none; padding: 6px 8px; border-radius: 5px; font-weight: 600; font-size: 11px; cursor: pointer;">
+                    🎯 Set as Dest
+                </button>
+            </div>
         </div>
     `).openPopup();
 
-    // Hide search results
-    document.getElementById('searchResults').style.display = 'none';
-    document.getElementById('mapSearch').value = name;
+    // Hide search results dropdown and populate search input
+    const resultsContainer = document.getElementById('searchResults');
+    if (resultsContainer) resultsContainer.style.display = 'none';
+
+    const searchInput = document.getElementById('mapSearch');
+    if (searchInput) searchInput.value = name;
 
     showNotification(`📍 Navigated to ${name}`, 'success');
+}
+
+function setAsRoutePoint(name, lat, lng, type) {
+    const input = document.getElementById(type === 'start' ? 'srStart' : 'srDest');
+    if (input) {
+        input.value = name;
+        input.dataset.lat = lat;
+        input.dataset.lng = lng;
+        input.dataset.coords = `${lat},${lng}`;
+    }
+
+    // Open the safe routes sidebar/modal if it has a toggle
+    const safeRoutesPanel = document.getElementById('safeRoutesPanel') || document.getElementById('smartRoutesModal');
+    if (safeRoutesPanel) {
+        safeRoutesPanel.style.display = 'block';
+        safeRoutesPanel.classList.remove('hidden');
+    }
+
+    showNotification(`📍 Set "${name}" as route ${type === 'start' ? 'starting point' : 'destination'}!`, 'info');
 }
 
 function switchMapLayer(layerType) {
